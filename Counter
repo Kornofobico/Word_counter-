@@ -1,0 +1,258 @@
+-- LocalScript: Contador de palavras do chat + gravação em arquivo (com indicador pequeno no canto)
+-- Compatível com executores que expõem writefile/appendfile/makefolder/isfolder/readfile
+-- Coloque em StarterPlayer > StarterPlayerScripts e execute com seu executor (Delta)
+
+local TextChatService = game:GetService("TextChatService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+-- Configurações
+local IGNORE_COMMANDS = true
+local SAVE_INTERVAL = 30 -- segundos (5 minutos)
+local FOLDER_NAME = "DeltaChatLogs"
+local RAW_FILE = FOLDER_NAME .. "/chat_log.txt"
+local GLOBAL_FILE = FOLDER_NAME .. "/word_counts.txt"
+
+-- Estado
+local wordCounts = {}
+local buffer = {}
+local lastFlushOk = true
+
+-- util: sanitização básica
+local function sanitize(word)
+    if not word then return "" end
+    word = word:lower()
+    word = word:gsub("^%p+", ""):gsub("%p+$", "")
+    word = word:match("^%s*(.-)%s*$") or word
+    return word
+end
+
+-- conta palavras de uma mensagem
+local function messageWordCounts(msg)
+    local counts = {}
+    for token in string.gmatch(msg, "%S+") do
+        local w = sanitize(token)
+        if w ~= "" then
+            counts[w] = (counts[w] or 0) + 1
+        end
+    end
+    return counts
+end
+
+-- formata counts como "palavra(1) palavra(2)..."
+local function formatCountsAsList(countsTable)
+    local arr = {}
+    for w, c in pairs(countsTable) do
+        table.insert(arr, {word = w, count = c})
+    end
+    table.sort(arr, function(a,b)
+        if a.count == b.count then
+            return a.word < b.word
+        end
+        return a.count > b.count
+    end)
+    local parts = {}
+    for _, it in ipairs(arr) do
+        table.insert(parts, string.format("%s(%d)", it.word, it.count))
+    end
+    return table.concat(parts, " ")
+end
+
+local function addToBuffer(line)
+    if not line then return end
+    table.insert(buffer, line)
+end
+
+-- processa mensagem: atualiza contagem global e adiciona linha formatada ao buffer
+local function processMessage(msg, senderName)
+    if not msg or msg == "" then return end
+    if IGNORE_COMMANDS and msg:sub(1,1) == "/" then return end
+
+    local msgCounts = messageWordCounts(msg)
+    for w, c in pairs(msgCounts) do
+        wordCounts[w] = (wordCounts[w] or 0) + c
+    end
+
+    local ts = os.date("%Y-%m-%d %H:%M:%S")
+    local listStr = formatCountsAsList(msgCounts)
+    local line = string.format("[%s] %s: %s", ts, senderName or "Unknown", listStr)
+    addToBuffer(line)
+end
+
+-- Funções de arquivo (detecção de APIs de executor)
+local function ensureFolderExists()
+    if type(isfolder) == "function" and type(makefolder) == "function" then
+        local ok, _ = pcall(function()
+            if not isfolder(FOLDER_NAME) then
+                makefolder(FOLDER_NAME)
+            end
+        end)
+        return ok
+    end
+    return true
+end
+
+local function safeWriteAppend(path, content)
+    if type(appendfile) == "function" then
+        if pcall(function() appendfile(path, content) end) then return true end
+    end
+    if type(readfile) == "function" and type(writefile) == "function" then
+        local ok = pcall(function()
+            local existing = ""
+            if pcall(function() existing = readfile(path) end) then end
+            writefile(path, existing .. content)
+        end)
+        if ok then return true end
+    end
+    if type(writefile) == "function" then
+        if pcall(function() writefile(path, content) end) then return true end
+    end
+    return false
+end
+
+local function safeWrite(path, content)
+    if type(writefile) == "function" then
+        return pcall(function() writefile(path, content) end)
+    end
+    return false
+end
+
+-- indicador pequeno no canto: cria um ponto pequeno que muda de cor conforme estado de gravação
+local indicatorLabel = nil
+local function createIndicator()
+    pcall(function()
+        local screenGui = Instance.new("ScreenGui")
+        screenGui.Name = "ChatLoggerIndicatorGui"
+        screenGui.ResetOnSpawn = false
+        screenGui.IgnoreGuiInset = true
+
+        local dot = Instance.new("TextLabel")
+        dot.Name = "Dot"
+        dot.Size = UDim2.new(0, 12, 0, 12)
+        dot.Position = UDim2.new(1, -18, 0, 10) -- canto superior direito, pequeno deslocamento
+        dot.AnchorPoint = Vector2.new(0, 0)
+        dot.BackgroundColor3 = Color3.fromRGB(0, 200, 0) -- verde inicial
+        dot.BorderSizePixel = 0
+        dot.Text = ""
+        dot.Parent = screenGui
+
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 6)
+        corner.Parent = dot
+
+        screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+        indicatorLabel = dot
+    end)
+end
+
+local function setIndicatorOk(ok)
+    if not indicatorLabel then return end
+    pcall(function()
+        if ok then
+            indicatorLabel.BackgroundColor3 = Color3.fromRGB(0, 200, 0) -- verde
+        else
+            indicatorLabel.BackgroundColor3 = Color3.fromRGB(200, 50, 50) -- vermelho
+        end
+    end)
+end
+
+-- flushBuffer: escreve buffer (append) e sobrescreve arquivo global
+local function flushBuffer()
+    if not ensureFolderExists() then
+        warn("Não foi possível criar/garantir a pasta para logs.")
+        lastFlushOk = false
+        setIndicatorOk(false)
+        return false
+    end
+
+    if #buffer > 0 then
+        local toWrite = table.concat(buffer, "\n") .. "\n"
+        local ok = safeWriteAppend(RAW_FILE, toWrite)
+        if ok then
+            buffer = {}
+            lastFlushOk = true
+        else
+            warn("Falha ao gravar chat_log.txt (append). Tentarei novamente depois.")
+            lastFlushOk = false
+            setIndicatorOk(false)
+            return false
+        end
+    end
+
+    -- escrever arquivo de contagem global (sobrescrever)
+    local globalArr = {}
+    for w, c in pairs(wordCounts) do
+        table.insert(globalArr, {word = w, count = c})
+    end
+    table.sort(globalArr, function(a,b)
+        if a.count == b.count then
+            return a.word < b.word
+        end
+        return a.count > b.count
+    end)
+    local lines = {}
+    for _, it in ipairs(globalArr) do
+        table.insert(lines, string.format("%s (%d)", it.word, it.count))
+    end
+    local globalContent = table.concat(lines, "\n")
+    local okGlobal = safeWrite(GLOBAL_FILE, globalContent)
+    if not okGlobal then
+        warn("Falha ao gravar word_counts.txt (sobrescrever).")
+        lastFlushOk = false
+        setIndicatorOk(false)
+        return false
+    end
+
+    lastFlushOk = true
+    setIndicatorOk(true)
+    return true
+end
+
+-- loop periódico de flush
+task.spawn(function()
+    while true do
+        task.wait(SAVE_INTERVAL)
+        pcall(flushBuffer)
+    end
+end)
+
+-- cria indicador
+createIndicator()
+setIndicatorOk(true)
+
+-- handlers do chat (callback member ou fallback)
+local handledByTextChat = false
+local ok, err = pcall(function()
+    TextChatService.OnIncomingMessage = function(textChatMessage)
+        if not textChatMessage then return end
+        local text = textChatMessage.Text
+        local senderName = "Unknown"
+        pcall(function()
+            if textChatMessage.Sender and typeof(textChatMessage.Sender) == "Instance" and textChatMessage.Sender:IsA("Player") then
+                senderName = textChatMessage.Sender.Name
+            elseif textChatMessage.Sender ~= nil then
+                senderName = tostring(textChatMessage.Sender)
+            end
+        end)
+        if text then
+            processMessage(text, senderName)
+        end
+    end
+    handledByTextChat = true
+end)
+
+if not ok or not handledByTextChat then
+    warn("TextChatService.OnIncomingMessage indisponível; usando fallback LocalPlayer.Chatted (apenas mensagens locais).", err)
+    LocalPlayer.Chatted:Connect(function(msg)
+        processMessage(msg, LocalPlayer.Name)
+    end)
+end
+
+-- tenta salvar ao fechar
+pcall(function()
+    game:BindToClose(function()
+        pcall(flushBuffer)
+    end)
+end)
+
+print("Chat logger inicializado. Indicador pequeno ativo no canto. Logs: " .. RAW_FILE .. " e " .. GLOBAL_FILE)
