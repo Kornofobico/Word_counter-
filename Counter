@@ -1,47 +1,80 @@
--- LocalScript: Contador de palavras do chat (cliente)
--- Coloque em StarterPlayer > StarterPlayerScripts
+-- LocalScript: Contador de palavras do chat gravando em Workspace para o executor (cliente)
+-- Coloque em: StarterPlayer > StarterPlayerScripts
 
 local TextChatService = game:GetService("TextChatService")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
+local TOP_N = 20 -- Quantas palavras mostrar na UI
+local IGNORE_COMMANDS = true -- Ignora mensagens que comecem com '/'
 
--- Configurações
-local TOP_N = 20 -- quantas palavras mostrar na UI
-local IGNORE_COMMANDS = true -- ignora mensagens que começam com '/', como comandos
+-- Pasta em Workspace que irá conter os IntValues com as contagens
+local folderName = "ChatWordCounts_" .. LocalPlayer.Name
+local workspaceFolder = workspace:FindFirstChild(folderName)
+if not workspaceFolder then
+    workspaceFolder = Instance.new("Folder")
+    workspaceFolder.Name = folderName
+    workspaceFolder.Parent = workspace
+end
 
--- armazenamento de contagem
-local wordCounts = {}
-
--- util: remove pontuação básica do início/fim e converte para lowercase
-local function sanitize(word)
-    if not word then return "" end
+-- Sanitiza token para uso como nome de Instance em Workspace:
+-- - converte para lowercase
+-- - remove espaços/ponctuação indesejada, substitui por underscore
+-- - remove underscores duplicados nas bordas
+local function sanitizeForName(word)
+    if not word then return "unknown" end
     word = word:lower()
-    -- remove pontuação inicial/final (preserva acentos simples; pode ajustar se quiser)
-    word = word:gsub("^%p+", ""):gsub("%p+$", "")
-    -- remove espaços sobrando
-    word = word:match("^%s*(.-)%s*$") or word
+    word = word:match("^%s*(.-)%s*$") or word -- trim
+    -- substitui tudo que não for letra/número/underscore por underscore
+    word = word:gsub("[^%w]", "_")
+    -- colapsa underscores múltiplos
+    word = word:gsub("_+", "_")
+    -- remove underscores nas bordas
+    word = word:gsub("^_+", ""):gsub("_+$", "")
+    if word == "" then
+        return "unknown"
+    end
     return word
 end
 
--- atualiza contadores a partir de uma mensagem de texto
-local function processMessage(msg)
-    if not msg or msg == "" then return end
-    -- ignora comandos se desejado
-    if IGNORE_COMMANDS and msg:sub(1,1) == "/" then return end
+-- Sanitização para contar (remove pontuação nos extremos, mantém acentos)
+local function sanitizeToken(token)
+    if not token then return "" end
+    local w = token:lower()
+    w = w:gsub("^%p+", ""):gsub("%p+$", "")
+    w = w:match("^%s*(.-)%s*$") or w
+    return w
+end
 
-    for token in string.gmatch(msg, "%S+") do
-        local w = sanitize(token)
-        if w ~= "" then
-            wordCounts[w] = (wordCounts[w] or 0) + 1
-        end
+-- Atualiza Workspace: incrementa IntValue existente ou cria novo com Value = 1
+local function incrementWorkspaceCount(word)
+    local name = sanitizeForName(word)
+    local existing = workspaceFolder:FindFirstChild(name)
+    if existing and existing:IsA("IntValue") then
+        existing.Value = existing.Value + 1
+    else
+        local val = Instance.new("IntValue")
+        val.Name = name
+        val.Value = 1
+        val.Parent = workspaceFolder
+
+        -- opcional: guardar a forma "apresentável" da palavra original
+        local display = Instance.new("StringValue")
+        display.Name = "Display_" .. name
+        display.Value = word:lower()
+        display.Parent = val
     end
 end
 
--- retorna uma lista ordenada de pares {word, count}
-local function getTopWords(n)
+-- Retorna top N lendo diretamente dos IntValues dentro da pasta em Workspace
+local function getTopFromWorkspace(n)
     local arr = {}
-    for w, c in pairs(wordCounts) do
-        table.insert(arr, {word = w, count = c})
+    for _, child in ipairs(workspaceFolder:GetChildren()) do
+        if child:IsA("IntValue") then
+            -- tenta pegar o display se existir
+            local display = child:FindFirstChild("Display_" .. child.Name)
+            local word = (display and display.Value) or child.Name
+            table.insert(arr, {word = word, count = child.Value})
+        end
     end
     table.sort(arr, function(a,b)
         if a.count == b.count then
@@ -56,7 +89,7 @@ local function getTopWords(n)
     return res
 end
 
--- UI simples para mostrar os top N
+-- UI simples (similar ao anterior) que mostra top N com base no Workspace
 local function createUI()
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "ChatWordCounterGUI"
@@ -65,7 +98,7 @@ local function createUI()
     local frame = Instance.new("Frame")
     frame.Name = "Container"
     frame.Size = UDim2.new(0, 260, 0, 200)
-    frame.Position = UDim2.new(1, -270, 0, 10) -- canto superior direito
+    frame.Position = UDim2.new(1, -270, 0, 10)
     frame.BackgroundTransparency = 0.35
     frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     frame.Parent = screenGui
@@ -79,7 +112,7 @@ local function createUI()
     title.Font = Enum.Font.SourceSansBold
     title.TextSize = 18
     title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Text = "Top palavras"
+    title.Text = "Top palavras (Workspace)"
     title.Parent = frame
 
     local body = Instance.new("TextLabel")
@@ -102,9 +135,8 @@ end
 
 local bodyLabel = createUI()
 
--- atualiza a UI com os top N
 local function updateUI()
-    local top = getTopWords(TOP_N)
+    local top = getTopFromWorkspace(TOP_N)
     if #top == 0 then
         bodyLabel.Text = "Nenhuma palavra registrada ainda."
         return
@@ -116,30 +148,44 @@ local function updateUI()
     bodyLabel.Text = table.concat(lines, "\n")
 end
 
--- event handler para mensagens do TextChatService
-if TextChatService and TextChatService.OnIncomingMessage then
-    TextChatService.OnIncomingMessage:Connect(function(textChatMessage)
-        -- textChatMessage: objeto com properties como Text, SenderUserId, etc.
-        local text = textChatMessage.Text
-        if text then
-            processMessage(text)
-            updateUI()
-        end
-    end)
-else
-    -- fallback limitado: captura apenas as mensagens do próprio jogador
-    warn("TextChatService.OnIncomingMessage não disponível; fallback ativo (apenas mensagens locais).")
-    LocalPlayer.Chatted:Connect(function(msg)
-        processMessage(msg)
-        updateUI()
-    end)
-end
+-- Processa uma mensagem: tokeniza, sanitiza e incrementa no Workspace
+local function processMessage(msg)
+    if not msg or msg == "" then return end
+    if IGNORE_COMMANDS and msg:sub(1,1) == "/" then return end
 
--- opcional: função pública para resetar contagem (pode chamar via comando remoto se quiser)
-local function resetCounts()
-    wordCounts = {}
+    for token in string.gmatch(msg, "%S+") do
+        local w = sanitizeToken(token)
+        if w ~= "" then
+            incrementWorkspaceCount(w)
+        end
+    end
     updateUI()
 end
 
--- exemplo: expõe no PlayerGui para testes (não necessário)
--- LocalPlayer.PlayerGui:SetAttribute("ResetChatCounter", resetCounts)
+-- Conecta ao TextChatService (novo sistema) ou fallback para LocalPlayer.Chatted
+if TextChatService and TextChatService.OnIncomingMessage then
+    TextChatService.OnIncomingMessage:Connect(function(textChatMessage)
+        local text = textChatMessage.Text
+        if text then
+            processMessage(text)
+        end
+    end)
+else
+    warn("TextChatService.OnIncomingMessage não disponível; fallback ativo (apenas mensagens locais).")
+    LocalPlayer.Chatted:Connect(function(msg)
+        processMessage(msg)
+    end)
+end
+
+-- Função pública para resetar contagens (apaga os IntValues)
+local function resetCounts()
+    for _, child in ipairs(workspaceFolder:GetChildren()) do
+        child:Destroy()
+    end
+    updateUI()
+end
+
+-- Expõe reset no PlayerGui com um atributo de teste (opcional)
+workspaceFolder:SetAttribute("Owner", LocalPlayer.Name)
+-- Para chamar reset manualmente (ex.: no console) você pode rodar:
+-- game.Workspace["ChatWordCounts_<SeuNome>"]:ClearAllChildren()  -- ou usar resetCounts dentro do LocalScript
