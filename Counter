@@ -1,1 +1,145 @@
+-- LocalScript: Contador de palavras do chat (cliente)
+-- Coloque em StarterPlayer > StarterPlayerScripts
 
+local TextChatService = game:GetService("TextChatService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+-- Configurações
+local TOP_N = 20 -- quantas palavras mostrar na UI
+local IGNORE_COMMANDS = true -- ignora mensagens que começam com '/', como comandos
+
+-- armazenamento de contagem
+local wordCounts = {}
+
+-- util: remove pontuação básica do início/fim e converte para lowercase
+local function sanitize(word)
+    if not word then return "" end
+    word = word:lower()
+    -- remove pontuação inicial/final (preserva acentos simples; pode ajustar se quiser)
+    word = word:gsub("^%p+", ""):gsub("%p+$", "")
+    -- remove espaços sobrando
+    word = word:match("^%s*(.-)%s*$") or word
+    return word
+end
+
+-- atualiza contadores a partir de uma mensagem de texto
+local function processMessage(msg)
+    if not msg or msg == "" then return end
+    -- ignora comandos se desejado
+    if IGNORE_COMMANDS and msg:sub(1,1) == "/" then return end
+
+    for token in string.gmatch(msg, "%S+") do
+        local w = sanitize(token)
+        if w ~= "" then
+            wordCounts[w] = (wordCounts[w] or 0) + 1
+        end
+    end
+end
+
+-- retorna uma lista ordenada de pares {word, count}
+local function getTopWords(n)
+    local arr = {}
+    for w, c in pairs(wordCounts) do
+        table.insert(arr, {word = w, count = c})
+    end
+    table.sort(arr, function(a,b)
+        if a.count == b.count then
+            return a.word < b.word
+        end
+        return a.count > b.count
+    end)
+    local res = {}
+    for i = 1, math.min(n, #arr) do
+        table.insert(res, arr[i])
+    end
+    return res
+end
+
+-- UI simples para mostrar os top N
+local function createUI()
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "ChatWordCounterGUI"
+    screenGui.ResetOnSpawn = false
+
+    local frame = Instance.new("Frame")
+    frame.Name = "Container"
+    frame.Size = UDim2.new(0, 260, 0, 200)
+    frame.Position = UDim2.new(1, -270, 0, 10) -- canto superior direito
+    frame.BackgroundTransparency = 0.35
+    frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    frame.Parent = screenGui
+
+    local title = Instance.new("TextLabel")
+    title.Name = "Title"
+    title.Size = UDim2.new(1, -10, 0, 24)
+    title.Position = UDim2.new(0, 5, 0, 5)
+    title.BackgroundTransparency = 1
+    title.TextColor3 = Color3.fromRGB(255,255,255)
+    title.Font = Enum.Font.SourceSansBold
+    title.TextSize = 18
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Text = "Top palavras"
+    title.Parent = frame
+
+    local body = Instance.new("TextLabel")
+    body.Name = "Body"
+    body.Size = UDim2.new(1, -10, 1, -34)
+    body.Position = UDim2.new(0, 5, 0, 30)
+    body.BackgroundTransparency = 1
+    body.TextColor3 = Color3.fromRGB(230,230,230)
+    body.Font = Enum.Font.SourceSans
+    body.TextSize = 16
+    body.TextXAlignment = Enum.TextXAlignment.Left
+    body.TextYAlignment = Enum.TextYAlignment.Top
+    body.TextWrapped = true
+    body.Text = ""
+    body.Parent = frame
+
+    screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    return body
+end
+
+local bodyLabel = createUI()
+
+-- atualiza a UI com os top N
+local function updateUI()
+    local top = getTopWords(TOP_N)
+    if #top == 0 then
+        bodyLabel.Text = "Nenhuma palavra registrada ainda."
+        return
+    end
+    local lines = {}
+    for i, item in ipairs(top) do
+        table.insert(lines, string.format("%d. %s (%d)", i, item.word, item.count))
+    end
+    bodyLabel.Text = table.concat(lines, "\n")
+end
+
+-- event handler para mensagens do TextChatService
+if TextChatService and TextChatService.OnIncomingMessage then
+    TextChatService.OnIncomingMessage:Connect(function(textChatMessage)
+        -- textChatMessage: objeto com properties como Text, SenderUserId, etc.
+        local text = textChatMessage.Text
+        if text then
+            processMessage(text)
+            updateUI()
+        end
+    end)
+else
+    -- fallback limitado: captura apenas as mensagens do próprio jogador
+    warn("TextChatService.OnIncomingMessage não disponível; fallback ativo (apenas mensagens locais).")
+    LocalPlayer.Chatted:Connect(function(msg)
+        processMessage(msg)
+        updateUI()
+    end)
+end
+
+-- opcional: função pública para resetar contagem (pode chamar via comando remoto se quiser)
+local function resetCounts()
+    wordCounts = {}
+    updateUI()
+end
+
+-- exemplo: expõe no PlayerGui para testes (não necessário)
+-- LocalPlayer.PlayerGui:SetAttribute("ResetChatCounter", resetCounts)
